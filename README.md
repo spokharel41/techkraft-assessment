@@ -1,8 +1,8 @@
 # TechKraft — Senior DevOps/Infrastructure Engineer Assignment
 
-**Candidate:** [Your Name]  
-**Email:** [your.email@gmail.com]  
-**Date:** [Date you submit]  
+**Candidate:** Sarthak Pokharel
+**Email:** sarthak.pokharel2@gmail.com
+**Date:** 6th May, 2026  
 **Total Time Spent:** ~145 minutes
 
 ---
@@ -10,8 +10,6 @@
 ## Overview
 
 This repository contains my solutions for the TechKraft Senior DevOps/Infrastructure Engineer take-home assignment. Each part reflects how I would approach these problems in a real production environment — not just "the right answer" but the reasoning behind each decision.
-
-**A note on context:** I've tailored several decisions specifically to TechKraft's Nepal-based operations — choosing Mumbai (ap-south-1) as the primary AWS region (~40ms latency from Kathmandu vs ~200ms from us-east-1), using NPT-friendly maintenance windows, and building cost-conscious solutions that make sense for a growing engineering company rather than a Fortune 500 budget.
 
 ---
 
