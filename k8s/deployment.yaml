@@ -1,0 +1,219 @@
+# Kubernetes Manifests for TechKraft Flask API
+
+---
+# ConfigMap — non-sensitive environment variables
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: techkraft-api-config
+  namespace: default
+  labels:
+    app: techkraft-api
+data:
+  FLASK_ENV: "production"
+  LOG_LEVEL: "INFO"
+  APP_VERSION: "1.0.0"
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: techkraft-api
+  namespace: default
+  labels:
+    app: techkraft-api
+    version: "1.0.0"
+  annotations:
+    # Track who last deployed and from which commit
+    deployment.kubernetes.io/revision: "1"
+spec:
+  replicas: 2
+  
+  selector:
+    matchLabels:
+      app: techkraft-api
+  
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # Allow 1 extra pod during update
+      maxUnavailable: 0  # Never take pods down before new ones are ready
+  
+  template:
+    metadata:
+      labels:
+        app: techkraft-api
+    spec:
+      # Don't run two pods on the same node (spread for HA)
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: techkraft-api
+                topologyKey: kubernetes.io/hostname
+      
+      # Security context for the pod
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      
+      containers:
+        - name: api
+          image: ACCOUNT.dkr.ecr.ap-south-1.amazonaws.com/techkraft-api:latest
+          imagePullPolicy: Always
+          
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+          
+          # Environment from ConfigMap
+          envFrom:
+            - configMapRef:
+                name: techkraft-api-config
+          
+          # Secrets mounted as env vars (never hardcoded)
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: techkraft-secrets
+                  key: database-url
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: techkraft-secrets
+                  key: secret-key
+          
+          # Resource limits — prevent one pod from starving the node
+          resources:
+            requests:
+              cpu: "100m"      # 0.1 CPU cores guaranteed
+              memory: "128Mi"  # 128MB guaranteed
+            limits:
+              cpu: "500m"      # Max 0.5 CPU cores
+              memory: "256Mi"  # Max 256MB (pod killed if exceeded)
+          
+          # Liveness probe — restart pod if it becomes unresponsive
+          # Checked after initialDelaySeconds to allow startup
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 15   # Wait 15s before first check
+            periodSeconds: 20         # Check every 20s
+            timeoutSeconds: 5         # Fail if no response in 5s
+            failureThreshold: 3       # Restart after 3 consecutive failures
+          
+          # Readiness probe — only route traffic when truly ready
+          # Stricter than liveness — pod must pass before receiving traffic
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 5    # Start checking after 5s
+            periodSeconds: 10         # Check every 10s
+            timeoutSeconds: 3
+            failureThreshold: 2       # Remove from LB after 2 failures
+          
+          # Startup probe — for slow-starting apps (gives extra time on init)
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            failureThreshold: 30      # 30 x 2s = 60s max startup time
+            periodSeconds: 2
+          
+          # Security hardening at container level
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL  # Drop all Linux capabilities
+
+---
+# Service — exposes the deployment internally
+apiVersion: v1
+kind: Service
+metadata:
+  name: techkraft-api
+  namespace: default
+  labels:
+    app: techkraft-api
+spec:
+  selector:
+    app: techkraft-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5000
+      protocol: TCP
+  type: ClusterIP  # Internal only; Ingress/ALB handles external traffic
+
+---
+# HorizontalPodAutoscaler — scale based on CPU load
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: techkraft-api-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: techkraft-api
+  
+  minReplicas: 2  # Always at least 2 for HA
+  maxReplicas: 10 # Never more than 10 (cost control + resource limits)
+  
+  metrics:
+    # Scale up when average CPU > 70%
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    
+    # Scale up when average memory > 80%
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Wait 5 min before scaling down (avoid flapping)
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60  # Remove max 1 pod per minute when scaling down
+    scaleUp:
+      stabilizationWindowSeconds: 0    # Scale up immediately
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60  # Add max 2 pods per minute when scaling up
+
+---
+# PodDisruptionBudget — ensure HA during cluster maintenance
+# (node upgrades, drains, etc. won't take all pods down)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: techkraft-api-pdb
+  namespace: default
+spec:
+  minAvailable: 1  # Always keep at least 1 pod running during disruptions
+  selector:
+    matchLabels:
+      app: techkraft-api
